@@ -20,121 +20,56 @@
 
 int serial_port;  // ✅ GLOBAL so the handler can see it
 
-int pan = 1620; // global pan pwm variable
-int tilt = 1970; // global tilt pwm variable
+//~ int pan = 1620; // global pan pwm variable
+//~ int tilt = 1970; // global tilt pwm variable
 
 // used for servo scanning
-int pan_count = 1666;
-int dir = 5;
-int struct_count = 0;
+int pan = 1666;
+int working_pan;
+
+
+int tilt = 2000;
+
+int dir = 11;
+
+int current_tracking_distance = 150;
 
 typedef struct {
-    int id;
-    int pan_struct;
-    int tilt_struct;
-    int distance_struct;
-} DistanceStruct;
+  int pan;
+  int tilt;
+  int distance;
+} ScanPoint;
 
-DistanceStruct data_array[8000];
+typedef struct {
+  ScanPoint points[1000];
+  int count;
+  
+  int pan_avg,tilt_avg;
+} ScanFrame;
 
-void plot_mode() {
+ScanFrame frames[1000];
+int frame_count = 0;
+
+void plot_mode(FILE* pipeForGNUPlot) {
 	
 	
-	FILE *pipeForGNUPlot = NULL;
+    //~ FILE *pipeForGNUPlot = NULL;
 
-    pipeForGNUPlot = popen("gnuplot -persistent", "w");
+    //~ pipeForGNUPlot = popen("gnuplot -persistent", "w");
 
     if (pipeForGNUPlot != NULL) {
-		fprintf(pipeForGNUPlot, "set title \"Lidar Scan - Top Down Filled\"\n");
-		fprintf(pipeForGNUPlot, "set xlabel \"Pan (PWM)\"\n");
-		fprintf(pipeForGNUPlot, "set ylabel \"Tilt (PWM)\"\n");
-		fprintf(pipeForGNUPlot, "set view map\n");
-		fprintf(pipeForGNUPlot, "set pm3d map\n");
-		fprintf(pipeForGNUPlot, "set palette defined (0 \"blue\", 1 \"green\", 2 \"yellow\", 3 \"red\")\n");
-		fprintf(pipeForGNUPlot, "set dgrid3d 30,30 qnorm 2\n");
-		fprintf(pipeForGNUPlot, "splot \"scan_results.txt\" using 1:2:3 with pm3d notitle\n");
-		fprintf(pipeForGNUPlot, "pause -1 \"Press Enter to exit\"\n");
 
+	fprintf(pipeForGNUPlot, "splot \"scan_results.txt\" using 1:2:3 with pm3d notitle\n");
+	
+	fflush(pipeForGNUPlot);
 
-        pclose(pipeForGNUPlot);
+        //~ pclose(pipeForGNUPlot);
         
     } else {
         printf("Could not open pipe to Gnuplot.\n");
     }
 	
-
 		
-}
-
-void results_mode() {
-    int ch;
-    nodelay(stdscr, TRUE);
-
-    FILE *fp = fopen("scan_results.txt", "w");
-    if (fp == NULL) {
-        mvprintw(0, 0, "ERROR: Could not open file to write results.");
-        refresh();
-        sleep(2);
-        return;
-    }
-
-    int row = 2; // start rows below header
-    int max_rows, max_cols;
-    getmaxyx(stdscr, max_rows, max_cols);
-
-    clear();
-    mvprintw(0, 0, "RESULTS MODE - %d points collected.", struct_count);
-    mvprintw(1, 0, "Press q to return. Also saving to scan_results.txt");
-
-    for (int i = 0; i < struct_count; i++) {
-        // Write each entry to file: PAN TILT DISTANCE
-        fprintf(fp, "%d\t%d\t%d\n",
-                data_array[i].pan_struct,
-                data_array[i].tilt_struct,
-                data_array[i].distance_struct);
-
-        // Display on screen
-        int col = (i % 4) * 20; // 4 columns max, 20 chars wide for neat spacing
-
-        if (row >= max_rows - 1) {
-            mvprintw(max_rows - 1, 0, "Press any key to continue...");
-            refresh();
-            nodelay(stdscr, FALSE);
-            getch();
-            nodelay(stdscr, TRUE);
-            clear();
-            mvprintw(0, 0, "RESULTS MODE - %d points collected.", struct_count);
-            mvprintw(1, 0, "Press q to return. Also saving to scan_results.txt");
-            row = 2;
-        }
-
-        mvprintw(row, col, "P:%d T:%d D:%d",
-                 data_array[i].pan_struct,
-                 data_array[i].tilt_struct,
-                 data_array[i].distance_struct);
-
-        if ((i + 1) % 4 == 0) row++;
-    }
-
-    fclose(fp);
-
-    refresh();
-    
-	// ✅ Clear data after viewing
-    struct_count = 0;
-    memset(data_array, 0, sizeof(data_array));
-
-    nodelay(stdscr, FALSE); // restore blocking input
-
-    // Wait for q to quit results mode
-    while (1) {
-        ch = getch();
-        if (ch == 'q') {
-            break;
-        }
-    }
-
-
 }
 
 
@@ -166,13 +101,13 @@ void handle_sigint(int sig) {
 // manually control servos
 void manual_mode() {
     int ch;
-    int speed = 10;
+    int speed = 11;
 
     // Make getch non-blocking
     nodelay(stdscr, TRUE);
 
     while (1) {
-        ch = getch();
+	ch = getch();
 
         if (ch != ERR) {
             if (ch == 'q') {
@@ -186,131 +121,243 @@ void manual_mode() {
             }
         }
 
-        if (pan >= 2000) pan = 2000;
-        if (pan <= 1000) pan = 1000;
-        if (tilt >= 2000) tilt = 2000;
-        if (tilt <= 1000) tilt = 1000;
+        // Clamp servo PWM range
+        if (pan >= 2500) pan = 2500;
+        if (pan <= 500)  pan = 500;
+        if (tilt >= 2500) tilt = 2500;
+        if (tilt <= 500)  tilt = 500;
 
+        // Move servos
         gpioServo(SERVO_PAN, pan);
         gpioServo(SERVO_TILT, tilt);
 
+        // Always clear & redraw display
         clear();
         mvprintw(0, 0, "MANUAL MODE - press q to exit");
-        mvprintw(2, 0, "Pan PWM:   %d", pan);
-        mvprintw(3, 0, "Tilt PWM:  %d", tilt);
+        mvprintw(1, 0, "Pan PWM:   %d", pan);
+        mvprintw(2, 0, "Tilt PWM:  %d", tilt);
+
+        // Always try reading TF Luna
+        if (serialDataAvail(serial_port)) {
+            int distance, strength;
+            float temp;
+            int data[9];
+
+            read_tfluna_data(serial_port, data);
+
+            distance = data[2] + data[3] * 256;
+            strength = data[4] + data[5] * 256;
+            temp = data[6] + data[7] * 256;
+            temp = (temp / 8.0f) - 256.0f;
+
+            mvprintw(3, 0, "TF Luna:");
+            mvprintw(4, 0, "Distance: %d cm", distance);
+            mvprintw(5, 0, "Signal Strength: %d", strength);
+            mvprintw(6, 0, "Temperature: %.2f C", temp);
+        }
+
         refresh();
 
-        usleep(20000); // small delay
+        usleep(10000);  // ~20ms loop time
     }
 
-    // restore blocking mode when you return
     nodelay(stdscr, FALSE);
 }
 
-void scanning_mode() {
-	int ch;
+
+void servo_coordinates() {
+    
+
+    int curr_count = frames[frame_count].count;
+    
+    int high_bar = current_tracking_distance + 10;
+    int low_bar = current_tracking_distance - 10;
+
+    int pan_sum = 0, pan_count = 0;
+    int sum_distance = 0;
+    
+    for (int i = 0; i < frames[frame_count].count; i++) {
+	int pan = frames[frame_count].points[i].pan;
+	int tilt = frames[frame_count].points[i].tilt;
+	int distance = frames[frame_count].points[i].distance;
 	
-	int pan_count = 1666;
+	
+	if (distance > low_bar && distance < high_bar) {
+	    pan_sum += pan;
+	    pan_count++;
+	    sum_distance += distance;
+	}
+	
+	
+    }
+    
+    //~ if (frame_count > 5) {
+	//~ }
+    
+    if (pan_count > 0) {
+	current_tracking_distance = sum_distance / pan_count;
+	int pan_avg = pan_sum / pan_count;
+
+	frames[frame_count].pan_avg = pan_avg;
+
+	clear();
+	mvprintw(1, 0, "Yes Data:");
+	mvprintw(2, 0, "Current Pan: %d cm", pan);
+	mvprintw(3, 0, "Average Pan: %d cm", pan_avg);
+	mvprintw(3, 0, "Average Distance: %d cm", current_tracking_distance);
+
+
+	refresh();
+	
+	
+	if (pan_avg > pan) {
+	    pan = pan + 33;}
+	}
+	else {
+	    pan = pan - 33;}
+    
+
+    frame_count++;
+    
+}
+
+void scanning_mode(int p, int t, int width) {
+    
+    FILE *fp = fopen("scan_results.txt", "w");
+    if (!fp) {
+	perror("Could not open scan_results.txt for writing");
+	return;
+    }
+    
+    int ch;
+    
+    int stop_p = p + width;
+    int orig_p = p;
+    
+    int curr_count = 0;
 
     // Make getch non-blocking
     nodelay(stdscr, TRUE);
     
 
     while (1) {
-        ch = getch();
 
-        if (ch != ERR) {
-            if (ch == 'q') {
-                break;  // exit manual mode
-            }
-		}
+	
+	
+
+	// tilt up    
+	for (int angle = t; angle <= t + width; angle++) {
+	    gpioServo(SERVO_TILT, angle);
+	    usleep(1000);
+	    
+	    if (serialDataAvail(serial_port)) {
+		int distance, strength;
+		float temp;
+		int data[9];
+
+		read_tfluna_data(serial_port, data);
+
+		distance = data[2] + data[3] * 256;
+		strength = data[4] + data[5] * 256;
+		temp = data[6] + data[7] * 256;
+		temp = (temp / 8.0f) - 256.0f;
+
+		//~ clear();
+		//~ mvprintw(1, 0, "TF Luna:");
+		//~ mvprintw(2, 0, "Distance: %d cm", distance);
+		//~ mvprintw(3, 0, "Signal Strength: %d", strength);
+		//~ mvprintw(4, 0, "Temperature: %.2f C", temp);
+		//~ refresh();
 		
+		//~ // add data to DistanceStruct
+		//~ data_array[struct_count].pan_struct = pan_count;
+		//~ data_array[struct_count].tilt_struct = angle;
+		//~ data_array[struct_count].distance_struct = distance;
+		//~ struct_count++;
 		
-		for (int angle = 2000; angle <= 2033; angle++) {
-            gpioServo(SERVO_TILT, angle);
-            usleep(1000);
-            
-			if (serialDataAvail(serial_port)) {
-				int distance, strength;
-				float temp;
-				int data[9];
-
-				read_tfluna_data(serial_port, data);
-
-				distance = data[2] + data[3] * 256;
-				strength = data[4] + data[5] * 256;
-				temp = data[6] + data[7] * 256;
-				temp = (temp / 8.0f) - 256.0f;
-
-				clear();
-				mvprintw(1, 0, "TF Luna:");
-				mvprintw(2, 0, "Distance: %d cm", distance);
-				mvprintw(3, 0, "Signal Strength: %d", strength);
-				mvprintw(4, 0, "Temperature: %.2f C", temp);
-				refresh();
-				
-				// add data to DistanceStruct
-				data_array[struct_count].pan_struct = pan_count;
-				data_array[struct_count].tilt_struct = angle;
-				data_array[struct_count].distance_struct = distance;
-				struct_count++;
-			}
-            
+		if (strength < 1000) {
+		    continue;}
+		
+		// update results file
+		//~ fprintf(fp, "%d\t%d\t%d\n", p, angle, distance);
+                //~ fflush(fp); // force write immediately
+		curr_count = frames[frame_count].count;
+		frames[frame_count].points[curr_count].pan = p;
+		frames[frame_count].points[curr_count].tilt = angle;
+		frames[frame_count].points[curr_count].distance = distance;
+		frames[frame_count].count ++;
+	    }
+	
+	}
+        
+	// pan
+	gpioServo(SERVO_PAN, p);
+        
+        p = p + dir;
+        
+        if (p >= stop_p) {
+            dir = -11;
         }
         
-		gpioServo(SERVO_PAN, pan_count);
-        
-        pan_count = pan_count + dir;
-        
-        if (pan_count > 1700) {
-            dir = -5;
-        }
-        
-        if (pan_count < 1666) {
-            dir = 5;
+        if (p <= orig_p) {
+            dir = 11;
+	    
+	    
             break;
         }
 
-        for (int angle = 2033; angle >= 2000; angle--) {
+	// tilt down
+        for (int angle = t + width; angle >= t; angle--) {
             gpioServo(SERVO_TILT, angle);
             usleep(1000);
             
-			if (serialDataAvail(serial_port)) {
-				int distance, strength;
-				float temp;
-				int data[9];
+	    if (serialDataAvail(serial_port)) {
+		int distance, strength;
+		float temp;
+		int data[9];
 
-				read_tfluna_data(serial_port, data);
+		read_tfluna_data(serial_port, data);
 
-				distance = data[2] + data[3] * 256;
-				strength = data[4] + data[5] * 256;
-				temp = data[6] + data[7] * 256;
-				temp = (temp / 8.0f) - 256.0f;
+		distance = data[2] + data[3] * 256;
+		strength = data[4] + data[5] * 256;
+		temp = data[6] + data[7] * 256;
+		temp = (temp / 8.0f) - 256.0f;
 
-				clear();
-				mvprintw(1, 0, "TF Luna:");
-				mvprintw(2, 0, "Distance: %d cm", distance);
-				mvprintw(3, 0, "Signal Strength: %d", strength);
-				mvprintw(4, 0, "Temperature: %.2f C", temp);
-				refresh();
-				
-				// add data to DistanceStruct
-				data_array[struct_count].pan_struct = pan_count;
-				data_array[struct_count].tilt_struct = angle;
-				data_array[struct_count].distance_struct = distance;
-				struct_count++;
-			}
-            
-        }
-        
-
+		//~ clear();
+		//~ mvprintw(1, 0, "TF Luna:");
+		//~ mvprintw(2, 0, "Distance: %d cm", distance);
+		//~ mvprintw(3, 0, "Signal Strength: %d", strength);
+		//~ mvprintw(4, 0, "Temperature: %.2f C", temp);
+		//~ refresh();
+		
+		// add data to DistanceStruct
+		//~ data_array[struct_count].pan_struct = pan_count;
+		//~ data_array[struct_count].tilt_struct = angle;
+		//~ data_array[struct_count].distance_struct = distance;
+		//~ struct_count++;
+		
+		if (strength < 1000) {
+		    continue;}
+		    
+		curr_count = frames[frame_count].count;
+		frames[frame_count].points[curr_count].pan = p;
+		frames[frame_count].points[curr_count].tilt = angle;
+		frames[frame_count].points[curr_count].distance = distance;
+		frames[frame_count].count ++;
 
 		
-        
+		// update results file
+		//~ fprintf(fp, "%d\t%d\t%d\n", p, angle, distance);
+                //~ fflush(fp); // force write immediately
+		
 
+	    }
+            
+        }
 		
 	}
 }
+
 
 int main() {
 
@@ -335,50 +382,94 @@ int main() {
     // Register SIGINT handler
     signal(SIGINT, handle_sigint);
     
-
-
-	initscr();
+    initscr();
     keypad(stdscr, TRUE);
     
     noecho();
     cbreak();
     
-	int ch; // character input
-
+    int ch; // character input
     
+    // init file
+    FILE *fp = fopen("scan_results.txt", "w");
+    if (!fp) {
+	perror("Could not open scan_results.txt");
+    }
+
+    // init gnuplot
+    FILE *pipeForGNUPlot = popen("gnuplot -persistent", "w");
+    if (!pipeForGNUPlot) {
+	perror("Could not open pipe to Gnuplot");
+	fclose(fp);
+    }
+
+    fprintf(pipeForGNUPlot, "set title \"Lidar Scan - Top Down Filled\"\n");
+    fprintf(pipeForGNUPlot, "set xlabel \"Pan (PWM)\"\n");
+    fprintf(pipeForGNUPlot, "set ylabel \"Tilt (PWM)\"\n");
+    fprintf(pipeForGNUPlot, "set view map\n");
+    fprintf(pipeForGNUPlot, "set pm3d map\n");
+    fprintf(pipeForGNUPlot, "set palette defined (0 \"blue\", 1 \"green\", 2 \"yellow\", 3 \"red\")\n");
+    fprintf(pipeForGNUPlot, "set dgrid3d 30,30 qnorm 2\n");
+    //~ fprintf(pipeForGNUPlot, "pause -1 \"Press Enter to exit\"\n");
+
 
     while (1) {
 		
-		nodelay(stdscr, FALSE);  // ✅ make getch() non-blocking
-		
-		clear();
-		mvprintw(0,0,"Press 1 to Enter Manual Mode");
-		mvprintw(1,0,"Press 2 to Enter Scanning Mode");
-		mvprintw(2,0,"Press 3 to View Results");
-		mvprintw(3,0, "Press 4 to View Plot");
-		mvprintw(4,0,"Presss q to Enter Main Menu");
-		mvprintw(5,0,"Press Ctrl C to quit.\n");
-		refresh();
-		
-		ch = getch();
+	nodelay(stdscr, FALSE);  // ✅ make getch() non-blocking
+	
+	clear();
+	mvprintw(0,0,"Press 1 to Enter Manual Mode");
+	mvprintw(1,0,"Press 2 to Enter Scanning Mode");
+	mvprintw(2,0,"Press 3 to View Results");
+	mvprintw(3,0, "Press 4 to View Plot");
+	mvprintw(4,0,"Presss q to Enter Main Menu");
+	mvprintw(5,0,"Press Ctrl C to quit.\n");
+	refresh();
+	
+	ch = getch();
+	
+	int move_pan, move_tilt;
 
-		if (ch != ERR) {
-			switch (ch) {
-				case '1':				
-					manual_mode();
-					break;
-				case '2':
-					scanning_mode(); 
-					break;
-				case '3':
-					results_mode();
-					break;
-				case '4':
-					plot_mode();
-					break;
-					
+	if (ch != ERR) {
+	    switch (ch) {
+		case '1':				
+		    manual_mode();
+		    break;
+		case '2': 
+		    
+		    while (1) {
+			
+		    ch = getch();
+
+		    if (ch != ERR) {
+			if (ch == 'q') {
+			    break;  // exit manual mode
 			}
+			    }
+		    
+
+		    scanning_mode(pan, tilt, 33);
+
+		    servo_coordinates();
+
+		    
+		    //~ plot_mode(pipeForGNUPlot);
+		    //~ delay(1000);
+		    }
+		    
+		    //pclose(pipeForGNUPlot);
+
+    
+		    break;
+		
+		case '3':
+		    break;
+		case '4':
+		    //~ plot_mode();
+		    break;
+				
 		}
+	}
 
 
     }
