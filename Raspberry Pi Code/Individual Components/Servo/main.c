@@ -1,37 +1,157 @@
-
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <signal.h>
 #include <pigpio.h>
-#include <unistd.h>  // for usleep
+#include <pthread.h>
 
-#define SERVO_PIN1 18  // GPIO 18
-#define SERVO_PIN2 17  // GPIO 17
+#include <wiringPi.h>
+#include <wiringSerial.h>
+#include <errno.h>
+
+
+#define SERVO_PAN 18
+#define SERVO_TILT 17
+
+int target_distance = 140;
+
 
 volatile int running = 1;
 
-// Maps an angle to PWM for SERVO_PIN1 (min: 500, max: 2500, center: 1700)
-int map_angle_to_pwm_servo1(int angle) {
-    // Servo 1: -90° to +90° maps to 500 to 2500, center is 1700
-    // So full range is 2000 PWM units, but offset by center.
-    // However, since the center is 1700, the range is asymmetric.
-    // We'll map -90 to 500, 0 to 1700, +90 to 2500
+volatile int curr_pan;
+volatile int curr_tilt;
+volatile int global_pan = 1666;
+volatile int global_tilt = 2000;
+volatile int width = 33;
+int dir = 3;
 
-    float slope = (2500 - 500) / 180.0;  // PWM per degree
-    return (int)(1500 + (angle * slope));
+pthread_mutex_t pos_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+int serial_port;  // ✅ GLOBAL so the handler can see it
+
+// Comparison function for qsort
+int cmpfunc(const void *a, const void *b) {
+    return (*(int*)a - *(int*)b);
 }
 
-// Maps an angle to PWM for SERVO_PIN2 (min: 500, max: 2500, center: 1500)
-int map_angle_to_pwm_servo2(int angle) {
-    float slope = (2500 - 500) / 180.0;
-    return (int)(1500 + (angle * slope));
-}
 
-
-
-// Signal handler for clean exit
-void intHandler(int dummy) {
+void handle_sigint(int sig) {
     running = 0;
+
 }
+
+
+void* servo2_loop(void* arg) {
+    curr_pan = global_pan;
+    
+    while (running) {
+
+
+        // tilt up    
+        for (int angle = global_tilt; angle <= global_tilt + width; angle++) {
+            curr_tilt = angle;
+            gpioServo(SERVO_TILT, angle);
+            
+            pthread_mutex_lock(&pos_mutex);
+            curr_tilt = angle;
+            pthread_mutex_unlock(&pos_mutex);
+
+            
+            usleep(1000);
+
+            }
+        
+            
+        // pan
+        gpioServo(SERVO_PAN, curr_pan);
+            
+        curr_pan = curr_pan + dir;
+        
+        pthread_mutex_lock(&pos_mutex);
+        curr_pan = curr_pan + dir;
+        pthread_mutex_unlock(&pos_mutex);
+        
+        
+        if (curr_pan >= global_pan + width) {
+            dir = -3;
+        }
+        
+        if (curr_pan <= global_pan) {
+            dir = 3;
+        
+            }
+
+        // tilt down
+        for (int angle = global_tilt+width; angle >= global_tilt; angle--) {
+                curr_tilt = angle;
+                gpioServo(SERVO_TILT, angle);
+                usleep(1000);
+                
+                pthread_mutex_lock(&pos_mutex);
+                curr_tilt = angle;
+                pthread_mutex_unlock(&pos_mutex);
+
+                
+                
+            }
+		
+	}
+    
+    return NULL;
+    
+}
+    
+    
+void* tf_luna_read(void* arg) {
+    int serial_port = *(int*)arg;
+
+    int data[9];
+
+    while (running) {
+        if (serialDataAvail(serial_port) >= 9) {
+            for (int i = 0; i < 9; i++) {
+                data[i] = serialGetchar(serial_port);
+            }
+
+            int distance = data[2] + data[3] * 256;
+            int strength = data[4] + data[5] * 256;
+
+            if (strength > 1000 && abs(distance - target_distance) < 10) {
+                
+                
+                int pan_snapshot, tilt_snapshot;
+
+                pthread_mutex_lock(&pos_mutex);
+                pan_snapshot = curr_pan;
+                tilt_snapshot = curr_tilt;
+                pthread_mutex_unlock(&pos_mutex);
+                                
+                
+                
+                printf("pan=%d tilt=%d\n", pan_snapshot, tilt_snapshot);
+
+                FILE *fp = fopen("hits.txt", "a");
+                if (fp != NULL) {
+                    fprintf(fp, "%d,%d\n", pan_snapshot, tilt_snapshot);
+                    fclose(fp);
+                } else {
+                    perror("Failed to open file");
+                }
+
+        }
+        
+            else {
+
+            //~ printf("pan=%d tilt=%d dist=%d strength=%d\n", curr_pan, curr_tilt, distance, strength);
+        }
+    }
+}
+
+    return NULL;
+}
+
+
 
 int main() {
     if (gpioInitialise() < 0) {
@@ -39,60 +159,26 @@ int main() {
         return 1;
     }
 
-    signal(SIGINT, intHandler);  // Register Ctrl+C handler
+    if ((serial_port = serialOpen("/dev/serial0", 115200)) < 0) {
+        fprintf(stderr, "Unable to open serial device");
+        return 1;
+    }
 
-    printf("Starting servo sweep using mapped angles. Press Ctrl+C to stop.\n");
+    signal(SIGINT, handle_sigint);
 
-    int one_val = 1666;
-    int dir = 5;
+    pthread_t t2, t3;
+    pthread_create(&t2, NULL, servo2_loop, NULL);
+    pthread_create(&t3, NULL, tf_luna_read, &serial_port);
 
-    while (running) {
-    // Sweep from -90° to +90°
+    pthread_join(t2, NULL);
+    pthread_join(t3, NULL);
 
-        
-                for (int angle = 2000; angle <= 2033 && running; angle++) {
-            int pwm2 = map_angle_to_pwm_servo2(angle);
-            gpioServo(SERVO_PIN2, angle);
-            printf("Servo 2 Angle: %d°, PWM: %d\n", angle, pwm2);
-            usleep(1000);
-        }
-        
-                gpioServo(SERVO_PIN1, one_val);
-        
-        one_val = one_val + dir;
-        
-        if (one_val > 1700) {
-            dir = -5;
-        }
-        
-        if (one_val < 1666) {
-            dir = 5;
-        }
-
-        // Sweep Servo 2 back down from 50° to 45°
-        for (int angle = 2033; angle >= 2000 && running; angle--) {
-            int pwm2 = map_angle_to_pwm_servo2(angle);
-            gpioServo(SERVO_PIN2, angle);
-            printf("Servo 2 Angle: %d°, PWM: %d\n", angle, pwm2);
-            usleep(1000);
-        }
-        
-
-
-
-    //~ // Return to 0°, 0°
-    //~ int pwm1_center = map_angle_to_pwm_servo1(15);
-    //~ int pwm2_center = map_angle_to_pwm_servo2(50);
-    //~ gpioServo(SERVO_PIN1, pwm1_center);
-    //~ gpioServo(SERVO_PIN2, pwm2_center);
-    //~ usleep(200000);  // Hold at center
-}
-
-    // Stop sending pulses and cleanup
-    gpioServo(SERVO_PIN1, 0);
-    gpioServo(SERVO_PIN2, 1);
+    // Clean shutdown AFTER threads are done
+    gpioServo(SERVO_PAN, 0);
+    gpioServo(SERVO_TILT, 0);
     gpioTerminate();
+    printf("Stopped cleanly.\n");
 
-    printf("\nServo control stopped cleanly.\n");
     return 0;
 }
+

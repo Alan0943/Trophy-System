@@ -32,7 +32,7 @@ int tilt = 2000;
 
 int dir = 11;
 
-int current_tracking_distance = 150;
+int current_tracking_distance = 100;
 
 typedef struct {
   int pan;
